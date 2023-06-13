@@ -1,0 +1,250 @@
+#include <Arduino.h>                          //ArduinoJson Library: https://github.com/bblanchon/ArduinoJson
+#include <WiFi.h>
+#include "SinricPro.h"                        //SinricPro Library: https://sinricpro.github.io/esp8266-esp32-sdk/
+#include "SinricProSwitch.h"
+#include <map>
+
+// Uncomment the following line to enable serial debug output
+//#define ENABLE_DEBUG
+const long interval = 1000; 
+unsigned long previousMillis = 0; 
+#ifdef ENABLE_DEBUG
+       #define DEBUG_ESP_PORT Serial
+       #define NODEBUG_WEBSOCKETS             //arduinoWebSockets Library: https://github.com/Links2004/arduinoWebSockets
+       #define NDEBUG
+#endif 
+
+#define WIFI_SSID         "dell"      //Enter WiFi Name
+#define WIFI_PASS         "12345678"      //Enter WiFi Password
+#define APP_KEY           "c2a0aee3-cb2f-4637-89ba-2d2ea863f3d7"                  //Enter APP-KEY 
+#define APP_SECRET        "1e1214d0-a8d6-4b6d-bce4-583e9bca7c8c-750a4d45-8cb0-4260-a1f8-fd9fd1306d96"     //Enter APP-SECRET
+//Enter the device IDs here
+#define device_ID_1   "63fc63035ec7d92a47178c05"  //SWITCH 1 ID
+#define device_ID_2   "63fc62cd5ec7d92a47178bbb"  //SWITCH 2 ID
+#define device_ID_3   "63fc627c1bb4e19c11a86816"  //SWITCH 3 ID
+#define device_ID_4   ""  //SWITCH 3 ID    
+// define the GPIO connected with Relays and switches
+#define RelayPin1 32  //D23
+#define RelayPin2 33  //D22
+#define RelayPin3 25  //D21
+#define RelayPin4 26  //D21
+  #define SwitchPin1 13  //D13
+#define SwitchPin2 12  //D12
+#define SwitchPin3 14  //D14
+#define SwitchPin4 27  //D27
+
+#define wifiLed   19   //D2
+#define eyeLed   18   //D2
+//uncomment the following line if you use Push Buttons to toggle Relays
+//#define TACTILE_BUTTON 1
+
+#define BAUD_RATE   9600
+
+#define DEBOUNCE_TIME 250
+typedef struct {      // struct for the std::map below
+  int relayPIN;
+  int flipSwitchPIN;
+} deviceConfig_t;
+
+
+std::map<String, deviceConfig_t> devices = {
+    //{deviceId, {relayPIN,  flipSwitchPIN}}
+    {device_ID_1, {  RelayPin1, SwitchPin1 }},
+    {device_ID_2, {  RelayPin2, SwitchPin2 }},
+    {device_ID_3, {  RelayPin3, SwitchPin3 }},
+    {device_ID_4, {  RelayPin4, SwitchPin4 }}     
+};
+
+typedef struct {      // struct for the std::map below
+  String deviceId;
+  bool lastFlipSwitchState;
+  unsigned long lastFlipSwitchChange;
+} flipSwitchConfig_t;
+
+std::map<int, flipSwitchConfig_t> flipSwitches;    // this map is used to map flipSwitch PINs to deviceId and handling debounce and last flipSwitch state checks
+                                                  // it will be setup in "setupFlipSwitches" function, using informations from devices map
+
+void setupRelays() { 
+ pinMode(25, OUTPUT);
+ pinMode(26, OUTPUT);
+ pinMode(32, OUTPUT);
+  pinMode(33, OUTPUT);
+ pinMode(19, OUTPUT);
+ pinMode(18, OUTPUT);
+ 
+}
+
+void setupFlipSwitches() {
+  for (auto &device : devices)  {                     // for each device (relay / flipSwitch combination)
+    flipSwitchConfig_t flipSwitchConfig;              // create a new flipSwitch configuration
+
+    flipSwitchConfig.deviceId = device.first;         // set the deviceId
+    flipSwitchConfig.lastFlipSwitchChange = 0;        // set debounce time
+    flipSwitchConfig.lastFlipSwitchState = false;     // set lastFlipSwitchState to false (LOW)--
+
+    int flipSwitchPIN = device.second.flipSwitchPIN;  // get the flipSwitchPIN
+
+    flipSwitches[flipSwitchPIN] = flipSwitchConfig;   // save the flipSwitch config to flipSwitches map
+    pinMode(flipSwitchPIN, INPUT_PULLUP);                   // set the flipSwitch pin to INPUT
+  }
+}
+
+bool onPowerState(String deviceId, bool &state)
+{
+  Serial.printf("%s: %s\r\n", deviceId.c_str(), state ? "on" : "off");
+  int relayPIN = devices[deviceId].relayPIN; // get the relay pin for corresponding device
+  Serial.println(relayPIN);
+  digitalWrite(relayPIN, state);             // set the new relay state
+  return true;
+}
+
+void handleFlipSwitches() {
+  unsigned long actualMillis = millis();                                          // get actual millis
+  for (auto &flipSwitch : flipSwitches) {                                         // for each flipSwitch in flipSwitches map
+    unsigned long lastFlipSwitchChange = flipSwitch.second.lastFlipSwitchChange;  // get the timestamp when flipSwitch was pressed last time (used to debounce / limit events)
+
+    if (actualMillis - lastFlipSwitchChange > DEBOUNCE_TIME) {                    // if time is > debounce time...
+
+      int flipSwitchPIN = flipSwitch.first;                                       // get the flipSwitch pin from configuration
+bool lastFlipSwitchState = flipSwitch.second.lastFlipSwitchState;           // get the lastFlipSwitchState
+      bool flipSwitchState = digitalRead(flipSwitchPIN);                          // read the current flipSwitch state
+      if (flipSwitchState != lastFlipSwitchState) {                               // if the flipSwitchState has changed...
+#ifdef TACTILE_BUTTON
+        if (flipSwitchState) {                                                    // if the tactile button is pressed 
+#endif      
+          flipSwitch.second.lastFlipSwitchChange = actualMillis;                  // update lastFlipSwitchChange time
+          String deviceId = flipSwitch.second.deviceId;                           // get the deviceId from config
+          int relayPIN = devices[deviceId].relayPIN;                              // get the relayPIN from config
+          bool newRelayState = !digitalRead(relayPIN);                            // set the new relay State
+          digitalWrite(relayPIN, newRelayState);                                  // set the trelay to the new state
+
+          SinricProSwitch &mySwitch = SinricPro[deviceId];                        // get Switch device from SinricPro
+          mySwitch.sendPowerStateEvent(!newRelayState);                            // send the event
+#ifdef TACTILE_BUTTON
+        }
+#endif      
+        flipSwitch.second.lastFlipSwitchState = flipSwitchState;                  // update lastFlipSwitchState
+      }
+    }
+  }
+}
+
+void setupWiFi()
+{
+  Serial.printf("\r\n[Wifi]: Connecting");
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.printf(".");
+    delay(250);
+  }
+  digitalWrite(wifiLed, HIGH);
+  Serial.printf("connected!\r\n[WiFi]: IP-Address is %s\r\n", WiFi.localIP().toString().c_str());
+}
+
+void setupSinricPro()
+{
+  for (auto &device : devices)
+  {
+    const char *deviceId = device.first.c_str();
+    SinricProSwitch &mySwitch = SinricPro[deviceId];
+    mySwitch.onPowerState(onPowerState);
+  }
+
+  SinricPro.begin(APP_KEY, APP_SECRET);
+  SinricPro.restoreDeviceStates(true);
+ }
+  void setup()
+{
+  Serial.begin(BAUD_RATE);
+  pinMode(wifiLed, OUTPUT);
+   pinMode(16, INPUT);
+  digitalWrite(wifiLed, LOW);
+
+  setupRelays();
+  setupWiFi();
+  setupSinricPro();
+}
+int state=0,logic=0,count=0,currentMillis=0;
+void loop()
+{
+  SinricPro.handle();
+  
+  if(digitalRead(16)==HIGH)
+  {Serial.println("Eye Blink detected");
+  while(digitalRead(16)==HIGH)
+  {delay(10);
+  currentMillis=currentMillis+1;
+    if (currentMillis >= 300) 
+    {
+      digitalWrite(eyeLed,HIGH);
+    load_logic();
+    }
+  }
+  currentMillis=0;
+  digitalWrite(eyeLed,LOW);
+  if(count==1)
+  {loadon_off1();}
+  else if(count==2)
+  {loadon_off2();}
+  else if(count==3)
+{loadon_off3();}
+  else if(count>=4)
+  {loadon_off4();}
+  count=0;
+  
+ }
+}
+void load_logic()
+{Serial.println("Eye Blink Logic");
+ while(digitalRead(16)==LOW)
+  {} 
+ while(1)
+          {
+                    if(digitalRead(16)==HIGH)
+                    {
+                      while(digitalRead(16)==HIGH)
+                    {
+                      delay(10);
+                      state=state+1;
+                      if(state>300)
+                      {logic=1;
+                      digitalWrite(eyeLed,LOW);
+                      Serial.println("Deactivated");}
+                     }state=0;
+                     if(logic==1)
+                     {state=0;logic =0;
+                     break;}
+                     else
+                     {count=count+1;Serial.println(count);}
+                    }
+           }
+}
+
+void loadon_off1()
+{
+  if(digitalRead(32)==LOW)
+{digitalWrite(32,HIGH);}
+u
+{digitalWrite(32,LOW);}
+
+}
+void loadon_off2()
+{if(digitalRead(33)==LOW)
+{digitalWrite(33,HIGH);}
+else
+{digitalWrite(33,LOW);}
+}
+void loadon_off3()
+{if(digitalRead(26)==LOW)
+{digitalWrite(26,HIGH);}
+else
+{digitalWrite(26,LOW);}
+}
+void loadon_off4()
+{if(digitalRead(25)==LOW)
+{digitalWrite(25,HIGH);}
+else
+{digitalWrite(25,LOW);}
+}
